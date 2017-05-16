@@ -31,7 +31,6 @@ __host__ InvertedIndex make_inverted_index(int num_docs, int num_terms, int size
 	int *d_count = dev_vars->d_count, *d_index = dev_vars->d_index;
 
 	gpuAssert(cudaMemset(d_count, 0, num_terms * sizeof(int)));
-	gpuAssert(cudaMemcpy(d_entries, &entries[entries_offset], size_entries * sizeof(Entry), cudaMemcpyHostToDevice));
 
 	dim3 grid, threads;
 	get_grid_config(grid, threads);

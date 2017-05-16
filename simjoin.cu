@@ -36,27 +36,27 @@
 
 __host__ int findSimilars(InvertedIndex index, float threshold, struct DeviceVariables *dev_vars, Pair *similar_pairs,
 		int probes_start, int probe_block_size, int probes_offset,
-		int indexed_start, int indexed_block_size, int indexed_offset) {
+		int indexed_start, int indexed_block_size, int indexed_offset, int block_size) {
 	dim3 grid, threads;
 	get_grid_config(grid, threads);
 	int *intersection = dev_vars->d_intersection;
 	int *starts = dev_vars->d_starts;
 	int *sizes = dev_vars->d_sizes;
-	Entry *probes = dev_vars->d_entries + probes_offset;
-	Entry *indexed = dev_vars->d_entries + indexed_offset;
+	Entry *probes = dev_vars->d_entries;
+	Entry *indexed = dev_vars->d_entries;
 	Pair *pairs = dev_vars->d_pairs;
-	int intersection_size = probe_block_size*indexed_block_size; // TODO verificar tamanho quando blocos são menores q os blocos normais
+	int intersection_size = block_size*block_size; // TODO verificar tamanho quando blocos são menores q os blocos normais
 	int *totalSimilars = (int *)malloc(sizeof(int));
 
 	// the last position of intersection is used to store the number of similar pairs
 	cudaMemset(intersection, 0, sizeof(int) * (intersection_size + 1));
 
 	generateCandidates<<<grid, threads>>>(index, intersection, probes, starts, sizes, probes_start, probe_block_size,
-			probes_offset, indexed_start, threshold);
+			probes_offset, indexed_start, threshold, block_size);
 
 	verifyCandidates<<<grid, threads>>>(intersection, pairs, probes, indexed,
 			 sizes, starts, probes_offset, indexed_offset, probes_start, indexed_start,
-			 probe_block_size, indexed_block_size, intersection_size, intersection + intersection_size, threshold);
+			 probe_block_size, indexed_block_size, intersection_size, intersection + intersection_size, threshold, block_size);
 
 	gpuAssert(cudaMemcpy(totalSimilars, intersection + intersection_size, sizeof(int), cudaMemcpyDeviceToHost));
 	gpuAssert(cudaMemcpy(similar_pairs, pairs, sizeof(Pair)*totalSimilars[0], cudaMemcpyDeviceToHost));
@@ -65,10 +65,10 @@ __host__ int findSimilars(InvertedIndex index, float threshold, struct DeviceVar
 }
 
 __global__ void generateCandidates(InvertedIndex index, int *intersection, Entry *probes, int *set_starts,
-		int *set_sizes, int probes_start, int block_size, int probes_offset, int indexed_start, float threshold) {
-	for (int i = blockIdx.x; i < block_size; i += gridDim.x) { // percorre os probe sets
+		int *set_sizes, int probes_start, int probe_block_size, int probes_offset, int indexed_start, float threshold, int block_size) {
+	for (int i = blockIdx.x; i < probe_block_size; i += gridDim.x) { // percorre os probe sets
 		int probe_id = i + probes_start; // setid_offset
-		int probe_start = set_starts[probe_id] - probes_offset; // offset da entrada
+		int probe_start = set_starts[probe_id]; // offset da entrada
 		int probe_size = set_sizes[probe_id];
 
 		int maxsize = ceil(((float) probe_size)/threshold) + 1;
@@ -84,8 +84,7 @@ __global__ void generateCandidates(InvertedIndex index, int *intersection, Entry
 				int idx_entry = index.d_inverted_index[k].set_id;
 
 				if (idx_entry > probe_id && set_sizes[idx_entry] < maxsize) {
-					int pos = i*block_size + idx_entry - indexed_start;
-					atomicAdd(&intersection[pos], 1);
+					atomicAdd(&intersection[i*block_size + idx_entry - indexed_start], 1);
 				}
 			}
 		}
@@ -95,18 +94,19 @@ __global__ void generateCandidates(InvertedIndex index, int *intersection, Entry
 __global__ void verifyCandidates(int *intersection, Pair *pairs, Entry *probes, Entry *indexed_sets,
 		int *sizes, int *starts, int probes_offset, int indexed_offset, int probes_start,
 		int indexed_start, int probe_block_size, int indexed_block_size, int intersection_size, int *totalSimilars,
-		float threshold) {
+		float threshold, int block_size) {
 
 	int i = blockIdx.x*blockDim.x + threadIdx.x;
 
-	for (; i < intersection_size && intersection[i] > 0; i += gridDim.x*blockDim.x) {
-		int x = i/probe_block_size + probes_start;
-		int y = i%indexed_block_size + indexed_start;
+	for (; i < intersection_size; i += gridDim.x*blockDim.x) {
+		if (intersection[i]) {
+		int x = i/block_size + probes_start;
+		int y = i%block_size + indexed_start;
 
-		Entry *set_x = probes + (starts[x] - probes_offset);
-		Entry *set_y = indexed_sets + (starts[y] - indexed_offset);
+		Entry *set_x = probes + starts[x];
+		Entry *set_y = indexed_sets + starts[y];
 
-		if (x < y) {
+		
 			float minoverlap = (threshold * ((float) (sizes[x] + sizes[y])) / (1 + threshold));
 			int overlap = intersection[i], m = 0, n = 0;
 
